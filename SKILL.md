@@ -385,6 +385,228 @@ def unregister_keymaps():
     addon_keymaps.clear()
 ```
 
+### API Compatibility and Versioning
+
+**When to use**: Ensuring your addon works across Blender 3.6 LTS, 4.x, and future 5.x versions. Handle the transition from OpenGL to Vulkan (default in 5.0+).
+
+```python
+import bpy
+import gpu
+
+# Set version constants
+BLENDER_40 = bpy.app.version >= (4, 0, 0)
+BLENDER_45 = bpy.app.version >= (4, 5, 0) # Official Vulkan support
+BLENDER_50 = bpy.app.version >= (5, 0, 0) # Vulkan by default
+
+def get_backend_safe_shader(shader_type):
+    """Handle built-in shader renames between OpenGL and Vulkan"""
+    # Blender 4.5+ Vulkan backend often requires explicit shader types
+    # Example: 'UNIFORM_COLOR' -> 'POINT_UNIFORM_COLOR' for points
+    if BLENDER_45 and shader_type == 'UNIFORM_COLOR':
+         # Use create_from_info for custom shaders or keep builtin logic branched
+         pass 
+    
+    name = shader_type
+    if BLENDER_40:
+        name = name.replace("2D_", "").replace("3D_", "")
+    return gpu.shader.from_builtin(name)
+
+def set_gpu_state(line_width=1.0):
+    """Vulkan/Metal don't support older global state line smoothing"""
+    if not BLENDER_45:
+        gpu.state.line_width_set(line_width)
+    else:
+        # 5.0+ prefers polyline shaders over global state
+        # Logic for polyline shader setup would go here
+        pass
+```
+
+**Common Version-Specific Changes:**
+- **Blender 4.0**: Principled BSDF overhaul (renamed inputs), GPU shader names changed (removed `2D_`/`3D_` prefixes), Node socket storage changed.
+- **Blender 4.2**: New Extensions system; prefers `blender_manifest.toml` over `bl_info` for distribution.
+- **Blender 4.5 - 5.0 (Vulkan Transition)**: 
+    - **Backends**: Official support for Vulkan (4.5) and making it default (5.0). 
+    - **Shaders**: Prefer `gpu.shader.create_from_info` over raw GLSL strings. 4.5+ Built-in shaders are stricter (e.g., use `'POINT_UNIFORM_COLOR'` for point clouds).
+    - **GPU State**: Global states like `line_width_set` and `point_size_set` are deprecated or behave differently in Vulkan; use thick line/polyline shaders instead.
+    - **Attributes**: Use `gpu_extras.batch.batch_for_shader` to ensure vertex attributes match the backend's requirements.
+
+### Master Level: Custom Matrix Gizmos
+
+**When to use**: Creating intuitive 3D interfaces like custom transform tools, interactive handles, or on-screen controls that follow complex 4x4 matrix math.
+
+```python
+import bpy
+from mathutils import Matrix
+
+class MYADDON_GGT_custom_gizmos(bpy.types.GizmoGroup):
+    bl_idname = "MYADDON_GGT_custom_gizmos"
+    bl_label = "Custom Matrix Gizmos"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_options = {'3D', 'PERSISTENT'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None
+
+    def setup(self, context):
+        # Create a 3D arrow gizmo
+        gz = self.gizmos.new("GIZMO_GT_arrow_3d")
+        
+        # Bind the gizmo to an object's property (e.g., location)
+        gz.target_set_prop("offset", context.active_object, "location", index=0)
+        
+        gz.color = 0.1, 1.0, 0.5
+        gz.alpha = 0.5
+        gz.color_highlight = 1.0, 1.0, 1.0
+        gz.alpha_highlight = 0.8
+        
+        self.handle_gizmo = gz
+
+    def refresh(self, context):
+        obj = context.active_object
+        gz = self.handle_gizmo
+        
+        # Master Step: Update the gizmo's matrix_basis to match the object
+        # This aligns the gizmo's local coordinate system with the object's world matrix
+        gz.matrix_basis = obj.matrix_world.normalized()
+
+def register():
+    bpy.utils.register_class(MYADDON_GGT_custom_gizmos)
+
+def unregister():
+    bpy.utils.unregister_class(MYADDON_GGT_custom_gizmos)
+```
+
+**Key Matrix Gizmo Concepts:**
+- **`matrix_basis`**: The 4x4 transformation matrix that defines the gizmo's position, rotation, and scale in the viewport.
+- **`target_set_prop`**: Connects a gizmo's interactive action (like dragging) directly to a Python property or ID data.
+- **`refresh()` vs `setup()`**: Use `setup` for creation and `refresh` for real-time matrix updates as the user moves objects or changes views.
+- **Space Math**: Use `obj.matrix_world` for world-space gizmos, or construct custom matrices for tangent-space or screen-space handles.
+
+### Modern Dependency Management (Blender 4.2+)
+
+**When to use**: Including external Python libraries (e.g., NumPy, Requests) without manual installation.
+
+```toml
+# In blender_manifest.toml
+[dependencies]
+wheels = [
+  "requests == 2.31.0",
+  "numpy >= 1.26.0",
+]
+
+[permissions]
+network = "Required to download textures from remote server"
+files = "Required to export .log files to disk"
+```
+
+### Geometry Nodes & Node Group API (4.0+)
+
+**When to use**: Procedural toolsets and custom modifiers. Note: 4.0+ uses the `node_tree.interface` for sockets.
+
+```python
+def create_geometry_node_group(name):
+    # Create the tree
+    group = bpy.data.node_groups.new(name, 'GeometryNodeTree')
+    
+    # Modern Socket Declaration (4.0+)
+    # Old groups.inputs.new() is deprecated
+    group.interface.new_socket(name="Size", in_out='INPUT', socket_type='NodeSocketFloat')
+    group.interface.new_socket(name="Mesh", in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    
+    nodes = group.nodes
+    input_node = nodes.new('NodeGroupInput')
+    output_node = nodes.new('NodeGroupOutput')
+    
+    # Create a simple Cube node
+    cube = nodes.new('GeometryNodeMeshCube')
+    group.links.new(input_node.outputs['Size'], cube.inputs['Size'])
+    group.links.new(cube.outputs['Mesh'], output_node.inputs['Mesh'])
+    
+    return group
+```
+
+### App Handlers & Timers
+
+**When to use**: Creating tools that react to the scene (e.g., auto-updating text) or running tasks in the background.
+
+```python
+@bpy.app.handlers.persistent
+def on_frame_change(scene):
+    print(f"Frame changed to: {scene.frame_current}")
+
+def delayed_tool_execution():
+    # Run once after 2 seconds
+    print("Executing delayed task...")
+    return None # Returning None stops the timer
+
+def register():
+    bpy.app.handlers.frame_change_post.append(on_frame_change)
+    bpy.app.timers.register(delayed_tool_execution, first_interval=2.0)
+
+def unregister():
+    bpy.app.handlers.frame_change_post.remove(on_frame_change)
+```
+
+### Generic Attributes API (5.0 Ready)
+
+**When to use**: Storing per-vertex or per-face data (UVs, Colors, Custom weights). Legacy methods like `vertex_colors` are deprecated.
+
+```python
+def add_custom_weight_attribute(obj):
+    # Create a generic attribute on the Point (Vertex) domain
+    attr = obj.data.attributes.new(
+        name="CustomWeight",
+        type='FLOAT',
+        domain='POINT'
+    )
+    
+    # Batch update values
+    values = [0.5] * len(obj.data.vertices)
+    attr.data.foreach_set("value", values)
+```
+
+### Cross-Platform Path Handling
+
+**When to use**: Ensuring your addon works on Windows, macOS, and Linux. Never use backslashes `\` or hardcoded `/home/user` strings.
+
+```python
+import bpy
+import os
+from pathlib import Path
+
+def get_addon_resources_path():
+    """Get path to a folder inside your addon directory"""
+    # Pathlib handles OS-specific separators automatically
+    addon_dir = Path(__file__).parent
+    resources_dir = addon_dir / "resources"
+    return resources_dir
+
+def get_blend_relative_path(filename):
+    """Get an absolute path relative to the current .blend file"""
+    if not bpy.data.is_saved:
+        return None
+    
+    # Blender's '//' prefix means 'relative to blend file'
+    # bpy.path.abspath converts it to a clean OS-native absolute path
+    relative_path = f"//{filename}"
+    return Path(bpy.path.abspath(relative_path))
+
+def save_temp_data(data_name):
+    """Use Blender's specific temp directory"""
+    # Don't hardcode /tmp/ or C:\Temp\
+    temp_dir = Path(bpy.app.tempdir)
+    file_path = temp_dir / f"addon_{data_name}.txt"
+    return file_path
+```
+
+**Cross-Platform Rules:**
+- **Always use `pathlib.Path`**: It is the modern Python standard. Use the `/` operator to join paths.
+- **Blender's `//` Prefix**: Always use `bpy.path.abspath("//...")` to resolve paths relative to the project file.
+- **Escape Spaces**: If passing paths to external commands (via `subprocess`), always wrap paths in quotes or use `shlex.quote()`.
+- **Case Sensitivity**: Remember that Linux/macOS are case-sensitive (`Texture.png` != `texture.png`), while Windows is not. Always use lowercase for asset filenames to avoid issues.
+
 ## Anti-Patterns
 
 ### ❌ Not Using `bl_options = {'REGISTER', 'UNDO'}`
